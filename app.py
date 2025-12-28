@@ -1,20 +1,33 @@
 from flask import Flask, render_template, request, redirect, url_for, session
 import sqlite3
 import os
+import re
+from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
-app.secret_key = 'supersecretkey'  # Hardcoded secret key
+# Use environment variable for secret key, fallback for development
+app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
 
 # Initialize database
 def init_db():
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (id INTEGER PRIMARY KEY, username TEXT, password TEXT)''')
+                 (id INTEGER PRIMARY KEY, username TEXT UNIQUE, password TEXT)''')
     conn.commit()
     conn.close()
 
 init_db()
+
+def validate_password(password):
+    """Enforce a basic password policy."""
+    if len(password) < 8:
+        return False, "Password must be at least 8 characters long."
+    if not re.search(r'[A-Za-z]', password):
+        return False, "Password must contain at least one letter."
+    if not re.search(r'\d', password):
+        return False, "Password must contain at least one digit."
+    return True, ""
 
 @app.route('/')
 def index():
@@ -28,13 +41,12 @@ def login():
         
         conn = sqlite3.connect('users.db')
         c = conn.cursor()
-        # SQL injection vulnerability: concatenating user input directly
-        query = "SELECT * FROM users WHERE username = '" + username + "' AND password = '" + password + "'"
-        c.execute(query)
+        # Use parameterized query to prevent SQL injection
+        c.execute("SELECT id, username, password FROM users WHERE username = ?", (username,))
         user = c.fetchone()
         conn.close()
         
-        if user:
+        if user and check_password_hash(user[2], password):
             session['user_id'] = user[0]
             session['username'] = user[1]
             return redirect(url_for('notes'))
@@ -49,13 +61,23 @@ def register():
         username = request.form['username']
         password = request.form['password']
         
-        # No password policy - accept any password
-        # Store password in plaintext
+        # Validate password strength
+        valid, msg = validate_password(password)
+        if not valid:
+            return render_template('register.html', error=msg)
+        
+        # Hash password before storing
+        password_hash = generate_password_hash(password)
+        
         conn = sqlite3.connect('users.db')
         c = conn.cursor()
-        c.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, password))
-        conn.commit()
-        conn.close()
+        try:
+            c.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, password_hash))
+            conn.commit()
+        except sqlite3.IntegrityError:
+            return render_template('register.html', error='Username already exists.')
+        finally:
+            conn.close()
         
         return redirect(url_for('login'))
     
@@ -75,4 +97,5 @@ def logout():
     return redirect(url_for('login'))
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    # Disable debug mode in production
+    app.run(debug=False)
